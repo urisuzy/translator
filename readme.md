@@ -23,8 +23,14 @@ Tried in order, first success wins:
    clean datacenter IPs. Kept because it costs nothing if it ever comes back.
 
 A provider that fails moves to the back of the queue for `PROVIDER_COOLDOWN`
-seconds, so an outage costs one failed round trip, not one per text. Every
-translation is cached, and outgoing calls are spaced out.
+seconds, so an outage costs one failed round trip, not one per text. Outgoing
+calls are spaced out.
+
+## Cache
+
+Every translation is stored in SQLite (`data/translations.sqlite3`, kept across
+restarts by the `.:/code` mount), keyed by the exact text (trimmed) and the
+language pair. The same text is translated once, ever; failures are not cached.
 
 ## Config
 
@@ -38,6 +44,7 @@ Lives in `.env` (see `.env.example`; never committed).
 | `LLM_TIMEOUT` | Seconds, default 60. |
 | `TRANSLATE_PROXY` | `http://user:pass@host:port`, applied to the free providers only. Lifts MyMemory's per-IP quota. Does **not** unblock Google. |
 | `MYMEMORY_EMAIL` | Raises MyMemory's quota from 5k to 50k chars/day. |
+| `TRANSLATE_CACHE_PATH` | Cache file, default `data/translations.sqlite3`. |
 | `PROVIDER_COOLDOWN` | Seconds a failed provider is deprioritised, default 900. |
 | `TRANSLATE_MIN_INTERVAL` | Seconds between outgoing calls, default 0.25. |
 

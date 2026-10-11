@@ -1,14 +1,19 @@
 """Self-check: python test_app.py (needs flask + deep_translator installed)."""
 
 import json
+import os
+import tempfile
 
 from deep_translator.exceptions import TooManyRequests
+
+# A throwaway cache file, set before app opens it.
+os.environ["TRANSLATE_CACHE_PATH"] = os.path.join(tempfile.mkdtemp(), "cache.sqlite3")
 
 import app as app_module
 
 
 def client():
-    app_module._translate.cache_clear()
+    app_module._cache_clear()
     app_module._blocked_until.clear()
     app_module.MIN_INTERVAL = 0.0
     return app_module.app.test_client()
@@ -117,6 +122,27 @@ def test_identical_text_is_only_translated_once():
     c.post("/translate", data={"text": "hello world"})
     c.post("/translate", data={"text": "hello world"})
     assert len(calls) == 1, calls
+
+
+def test_the_cache_outlives_a_restart():
+    calls = []
+    stub(llm=llm_response("halo dunia", counter=calls))
+    client().post("/translate", data={"text": "hello world"})
+    app_module._reopen_cache()  # what a container restart does to memory
+    res = app_module.app.test_client().post("/translate", data={"text": "hello world"})
+    assert res.get_json()["translated"] == "halo dunia", res.get_json()
+    assert len(calls) == 1, calls
+
+
+def test_the_cache_is_per_exact_text_and_language_pair():
+    calls = []
+    stub(llm=llm_response("halo", counter=calls))
+    c = client()
+    c.post("/translate", data={"text": "hello"})
+    c.post("/translate", data={"text": "hello "})  # trimmed: the same text
+    c.post("/translate", data={"text": "Hello"})
+    c.post("/translate", data={"text": "hello", "target": "ms"})
+    assert calls == ["hello", "Hello", "hello"], calls
 
 
 def test_every_provider_rate_limited_is_a_json_429():

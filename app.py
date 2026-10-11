@@ -1,6 +1,8 @@
+import hashlib
 import json
 import os
 import re
+import sqlite3
 import textwrap
 import threading
 import time
@@ -31,7 +33,10 @@ requests.utils.default_user_agent = lambda name="python-requests": (
 # stop paying a failed round trip per text.
 PROVIDER_COOLDOWN = float(os.environ.get("PROVIDER_COOLDOWN", "900"))
 MIN_INTERVAL = float(os.environ.get("TRANSLATE_MIN_INTERVAL", "0.25"))
-CACHE_SIZE = int(os.environ.get("TRANSLATE_CACHE_SIZE", "4096"))
+# Every translation is kept in a SQLite file, keyed by the exact text and the
+# language pair, so the same synopsis is never paid for twice, across restarts.
+# docker-compose mounts the repo at /code, so data/ survives rebuilds.
+CACHE_PATH = os.environ.get("TRANSLATE_CACHE_PATH") or os.path.join(os.path.dirname(os.path.abspath(__file__)), "data", "translations.sqlite3")
 
 LLM_BASE_URL = (os.environ.get("LLM_BASE_URL") or "").rstrip("/")
 LLM_API_KEY = os.environ.get("LLM_API_KEY") or ""
@@ -81,9 +86,63 @@ def translate():
     return jsonify({"text": text, "translated": translated})
 
 
-@lru_cache(maxsize=CACHE_SIZE)
+_cache_lock = threading.Lock()
+_cache_db = None
+
+
+def _cache():
+    global _cache_db
+    if _cache_db is None:
+        os.makedirs(os.path.dirname(CACHE_PATH), exist_ok=True)
+        _cache_db = sqlite3.connect(CACHE_PATH, check_same_thread=False)
+        _cache_db.execute(
+            "CREATE TABLE IF NOT EXISTS translations ("
+            " key TEXT PRIMARY KEY, source TEXT NOT NULL, target TEXT NOT NULL,"
+            " text TEXT NOT NULL, translated TEXT NOT NULL,"
+            " created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP)"
+        )
+        _cache_db.commit()
+    return _cache_db
+
+
+def _cache_key(text, source, target):
+    return hashlib.sha256(f"{source}\0{target}\0{text}".encode()).hexdigest()
+
+
+def _reopen_cache():
+    """Drop the connection; the next call reopens the file (as after a restart)."""
+    global _cache_db
+    with _cache_lock:
+        if _cache_db is not None:
+            _cache_db.close()
+        _cache_db = None
+
+
+def _cache_clear():
+    with _cache_lock:
+        _cache().execute("DELETE FROM translations")
+        _cache().commit()
+
+
 def _translate(text, source, target):
     """Cached translation. Failures raise, so they are never cached."""
+    key = _cache_key(text, source, target)
+    with _cache_lock:
+        row = _cache().execute("SELECT translated FROM translations WHERE key = ?", (key,)).fetchone()
+    if row:
+        return row[0]
+
+    translated = _translate_uncached(text, source, target)
+    with _cache_lock:
+        _cache().execute(
+            "INSERT OR REPLACE INTO translations (key, source, target, text, translated) VALUES (?, ?, ?, ?, ?)",
+            (key, source, target, text, translated),
+        )
+        _cache().commit()
+    return translated
+
+
+def _translate_uncached(text, source, target):
     failures = []
 
     for provider in _provider_order():
